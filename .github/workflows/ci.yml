@@ -225,7 +225,9 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          if npm view "@rogergomezm/node-tester@$version" version >/dev/null 2>&1; then
+          package="@rogergomezm/node-tester"
+          if npm view "$package@$version" version >/dev/null 2>&1 || \
+             npm dist-tag ls "$package" 2>/dev/null | grep -Eq "^latest:[[:space:]]+$version$"; then
             echo "published=true" >> "$GITHUB_OUTPUT"
           else
             echo "published=false" >> "$GITHUB_OUTPUT"
@@ -240,12 +242,16 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
+          package="@rogergomezm/node-tester"
           for attempt in {1..10}; do
-            published="$(npm view "@rogergomezm/node-tester@$version" version 2>/dev/null || true)"
+            published="$(npm view "$package@$version" version 2>/dev/null || true)"
             [[ "$published" == "$version" ]] && exit 0
+            if npm dist-tag ls "$package" 2>/dev/null | grep -Eq "^latest:[[:space:]]+$version$"; then
+              exit 0
+            fi
             sleep 3
           done
-          echo "npm did not expose @rogergomezm/node-tester@$version after publication" >&2
+          echo "npm did not expose $package@$version after publication" >&2
           exit 1
 
       - name: Create or repair GitHub release
