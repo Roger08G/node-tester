@@ -83,8 +83,8 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.8.6",
-    "@types/node": "^22.13.0",
+    "@types/node": "^26.2.0",
     "prettier": "^3.6.2",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   }
 }
