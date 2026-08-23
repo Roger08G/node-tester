@@ -255,9 +255,9 @@ jobs:
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" release/*.tgz release/*.tgz.sha256 --clobber
-            gh release edit "$GITHUB_REF_NAME" --title "node-tester ${GITHUB_REF_NAME#v}"
+            gh release edit "$GITHUB_REF_NAME" --title "Production ${GITHUB_REF_NAME#v}"
           else
-            gh release create "$GITHUB_REF_NAME" release/*.tgz release/*.tgz.sha256 --verify-tag --generate-notes --title "node-tester ${GITHUB_REF_NAME#v}"
+            gh release create "$GITHUB_REF_NAME" release/*.tgz release/*.tgz.sha256 --verify-tag --generate-notes --title "Production ${GITHUB_REF_NAME#v}"
           fi
 
       - name: Verify GitHub release
