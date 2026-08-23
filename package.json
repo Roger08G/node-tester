@@ -1,5 +1,5 @@
 {
-  "name": "@roger08g/node-tester",
+  "name": "@rogergomezm/node-tester",
   "version": "1.0.0",
   "description": "A production-focused Node.js test CLI powered by a Rust execution engine.",
   "type": "module",

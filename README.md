@@ -57,12 +57,12 @@ Jest, Vitest, Mocha, Bun Test, harnesses personalizados, modo watch y cobertura 
 El nombre npm sin scope `node-tester` pertenece a otro proyecto. Esta distribución está preparada como paquete público con scope:
 
 ```bash
-npm install --global @roger08g/node-tester
+npm install --global @rogergomezm/node-tester
 node-tester --version
 ```
 
 El paquete instala el comando `node-tester` globalmente. También puede usarse
-como biblioteca ESM desde `@roger08g/node-tester`.
+como biblioteca ESM desde `@rogergomezm/node-tester`.
 
 ## Uso
 
