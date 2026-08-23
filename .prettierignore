@@ -1,0 +1,7 @@
+dist/
+native/
+node_modules/
+target/
+Cargo.lock
+bun.lock
+test/fixtures/syntax-error.test.mjs

@@ -1,0 +1,20 @@
+[package]
+name = "node-tester-native"
+description = "Node-API binding for the node-tester Rust engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi.workspace = true
+napi-derive.workspace = true
+node-tester-engine = { path = "../engine" }
+serde_json.workspace = true
+
+[build-dependencies]
+napi-build.workspace = true
