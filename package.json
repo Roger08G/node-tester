@@ -1,6 +1,6 @@
 {
   "name": "@rogergomezm/node-tester",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A production-focused Node.js test CLI powered by a Rust execution engine.",
   "type": "module",
   "main": "./dist/index.js",

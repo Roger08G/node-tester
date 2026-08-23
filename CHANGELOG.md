@@ -2,6 +2,13 @@
 
 Los cambios relevantes de este proyecto se documentan aquí siguiendo versionado semántico.
 
+## 1.0.1 - 2026-08-23
+
+### Cambiado
+
+- Actualizado el banner visual del proyecto en `assets/test.png`.
+- Eliminado el recurso SVG anterior que ya no se utiliza.
+
 ## 1.0.0 - 2026-08-23
 
 ### Añadido
