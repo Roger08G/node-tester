@@ -17,6 +17,8 @@ function sample(args) {
     cwd: root,
     encoding: "utf8",
     windowsHide: true,
+    timeout: 60_000,
+    maxBuffer: 4 * 1024 * 1024,
   });
   if (child.status !== 0)
     throw new Error(
@@ -39,8 +41,15 @@ sample([cli, fixture, "--no-color"]);
 const native = [];
 const nodeTester = [];
 for (let index = 0; index < requested; index += 1) {
-  native.push(sample(["--test", fixture]));
-  nodeTester.push(sample([cli, fixture, "--no-color"]));
+  // Alternate order so a consistently warm/cold second process does not favor
+  // one runner throughout the benchmark.
+  if (index % 2 === 0) {
+    native.push(sample(["--test", fixture]));
+    nodeTester.push(sample([cli, fixture, "--no-color"]));
+  } else {
+    nodeTester.push(sample([cli, fixture, "--no-color"]));
+    native.push(sample(["--test", fixture]));
+  }
 }
 
 const nativeMedian = median(native);

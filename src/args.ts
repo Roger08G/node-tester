@@ -41,21 +41,29 @@ export function parseDuration(value: string, option: string): number {
   const multiplier = unit === "m" ? 60_000 : unit === "s" ? 1_000 : 1;
   const milliseconds = Math.round(amount * multiplier);
 
-  if (!Number.isSafeInteger(milliseconds) || milliseconds < 1) {
-    throw new UsageError(`${option} debe ser mayor que cero.`);
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds < 1 ||
+    milliseconds > 604_800_000
+  ) {
+    throw new UsageError(`${option} debe estar entre 1ms y 7 días.`);
   }
 
   return milliseconds;
 }
 
-function parsePositiveInteger(value: string, option: string): number {
+function parsePositiveInteger(
+  value: string,
+  option: string,
+  maximum: number,
+): number {
   if (!/^\d+$/.test(value)) {
     throw new UsageError(`${option} debe ser un entero positivo.`);
   }
 
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    throw new UsageError(`${option} debe ser un entero positivo.`);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new UsageError(`${option} debe ser un entero entre 1 y ${maximum}.`);
   }
   return parsed;
 }
@@ -134,6 +142,7 @@ export function parseArgs(args: readonly string[]): CliOptions {
         options.concurrency = parsePositiveInteger(
           readValue(args, index, argument),
           argument,
+          1024,
         );
         index += 1;
         break;
@@ -153,8 +162,11 @@ export function parseArgs(args: readonly string[]): CliOptions {
         break;
       case "--max-output-kb":
         options.maxOutputBytes =
-          parsePositiveInteger(readValue(args, index, argument), argument) *
-          1024;
+          parsePositiveInteger(
+            readValue(args, index, argument),
+            argument,
+            65_536,
+          ) * 1024;
         index += 1;
         break;
       default:

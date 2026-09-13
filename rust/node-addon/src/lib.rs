@@ -18,9 +18,11 @@ pub struct NativeExecution {
 impl NativeExecution {
     #[napi(constructor)]
     pub fn new(options_json: String) -> napi::Result<Self> {
+        if options_json.len() > 1024 * 1024 {
+            return Err(napi_error("engine options exceed 1 MiB"));
+        }
         let options: EngineOptions = serde_json::from_str(&options_json)
             .map_err(|error| napi_error(format!("invalid engine options JSON: {error}")))?;
-        let options = options.validate().map_err(napi_error)?;
         Ok(Self {
             options: Mutex::new(Some(options)),
             control: Arc::new(RunControl::default()),

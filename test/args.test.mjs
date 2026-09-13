@@ -37,3 +37,13 @@ test("parseArgs rejects files combined with globs", () => {
 test("parseArgs rejects unknown options", () => {
   assert.throws(() => parseArgs(["--reporter", "tap"]), /Opción desconocida/u);
 });
+
+test("rejects values above engine limits before conversion", () => {
+  for (const args of [
+    ["--concurrency", "1025"],
+    ["--max-output-kb", "65537"],
+    ["--max-output-kb", "9007199254740991"],
+    ["--run-timeout", "604800001ms"],
+  ])
+    assert.throws(() => parseArgs(args), UsageError);
+});

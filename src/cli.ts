@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseArgs, UsageError } from "./args.js";
 import { formatReport } from "./reporter.js";
 import { runTests } from "./runner.js";
+import { safeText } from "./safety.js";
 
 const manifest = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -14,18 +12,7 @@ const manifest = JSON.parse(
 const VERSION = manifest.version;
 
 function safeInternalMessage(value: string): string {
-  const project = resolve(process.cwd());
-  const home = resolve(homedir());
-  const projectUrl = pathToFileURL(project).href.replace(/\/$/u, "");
-  const homeUrl = pathToFileURL(home).href.replace(/\/$/u, "");
-  const sanitized = value
-    .replaceAll(projectUrl, "file:///<project>")
-    .replaceAll(homeUrl, "file:///<home>")
-    .replaceAll(project, "<project>")
-    .replaceAll(project.replaceAll("\\", "/"), "<project>")
-    .replaceAll(home, "<home>")
-    .replaceAll(home.replaceAll("\\", "/"), "<home>");
-  return Buffer.from(sanitized)
+  return Buffer.from(safeText(value))
     .subarray(0, 8 * 1024)
     .toString("utf8")
     .replace(/\uFFFD$/u, "");
@@ -66,12 +53,8 @@ async function main(): Promise<number> {
     }
 
     const controller = new AbortController();
-    let interrupts = 0;
-    const interrupt = () => {
-      interrupts += 1;
-      if (interrupts === 1) controller.abort();
-      else process.exit(130);
-    };
+    // Repeated signals must not bypass the engine's process-group cleanup.
+    const interrupt = () => controller.abort();
     process.on("SIGINT", interrupt);
     process.on("SIGTERM", interrupt);
     const result = await runTests({
@@ -96,7 +79,7 @@ async function main(): Promise<number> {
   } catch (error) {
     if (error instanceof UsageError) {
       process.stderr.write(
-        `node-tester: ${error.message}\nUsa --help para ver las opciones.\n`,
+        `node-tester: ${safeInternalMessage(error.message)}\nUsa --help para ver las opciones.\n`,
       );
       return 2;
     }

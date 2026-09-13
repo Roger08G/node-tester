@@ -34,6 +34,9 @@ No cambies el aislamiento por proceso ni añadas un parser de TAP/spec. Los nuev
 
 Los binarios se generan exclusivamente en GitHub Actions; no publiques un paquete creado en una sola plataforma. La versión de `package.json` debe coincidir exactamente con el tag `v<versión>`.
 
-La publicación usa Trusted Publishing para `Roger08G/node-tester`, el workflow
-`ci.yml` y el environment protegido `npm`. Nunca guardes credenciales npm en el
-repositorio.
+Las versiones de `package.json` y del workspace Rust deben coincidir. La rama
+de producción se llama `X.Y.Z` y el tag `vX.Y.Z`; no se mueven tags publicados.
+La publicación usa `ci.yml` y el environment `npm`, con su secreto de Actions o
+Trusted Publishing si está configurado en npm. Nunca guardes credenciales en el
+repositorio. Verifica la identidad y el SHA-512 del paquete instalado desde npm,
+los checksums de GitHub y el smoke test de instalación/desinstalación Windows.

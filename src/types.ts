@@ -13,6 +13,8 @@ export interface TestResult {
   nesting: number;
   location: TestLocation;
   error?: string;
+  /** Failed suites are rendered but are not added to the test count. */
+  isSuite?: boolean;
 }
 
 export interface CapturedOutput {

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { run } from "node:test";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 const PROTOCOL_VERSION = 1;
 const MAX_INPUT_BYTES = 1024 * 1024;
@@ -10,6 +11,16 @@ const MAX_NAME_BYTES = 4 * 1024;
 const MAX_PATH_BYTES = 16 * 1024;
 const MAX_ERROR_BYTES = 8 * 1024;
 const MAX_OUTPUT_EVENT_BYTES = 32 * 1024;
+const project = resolve(process.cwd());
+const userHome = resolve(homedir());
+const redactions = [
+  [pathToFileURL(project).href.replace(/\/$/u, ""), "file:///<project>"],
+  [pathToFileURL(userHome).href.replace(/\/$/u, ""), "file:///<home>"],
+  [project, "<project>"],
+  [project.replaceAll("\\", "/"), "<project>"],
+  [userHome, "<home>"],
+  [userHome.replaceAll("\\", "/"), "<home>"],
+];
 
 function truncateUtf8(value, maximum) {
   const encoded = Buffer.from(String(value));
@@ -25,17 +36,11 @@ function truncateUtf8(value, maximum) {
 }
 
 function sanitize(value) {
-  const project = resolve(process.cwd());
-  const userHome = resolve(homedir());
-  const projectUrl = pathToFileURL(project).href.replace(/\/$/u, "");
-  const homeUrl = pathToFileURL(userHome).href.replace(/\/$/u, "");
-  return String(value)
-    .replaceAll(projectUrl, "file:///<project>")
-    .replaceAll(homeUrl, "file:///<home>")
-    .replaceAll(project, "<project>")
-    .replaceAll(project.replaceAll("\\", "/"), "<project>")
-    .replaceAll(userHome, "<home>")
-    .replaceAll(userHome.replaceAll("\\", "/"), "<home>");
+  let text = stripVTControlCharacters(String(value));
+  for (const [path, replacement] of redactions) {
+    text = text.replaceAll(path, replacement);
+  }
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "");
 }
 
 function errorText(error) {
@@ -125,21 +130,25 @@ async function main() {
     argv: Array.isArray(options.test_args) ? options.test_args : [],
     execArgv: Array.isArray(options.node_args) ? options.node_args : [],
   });
+  let outputBytes = 0;
+  let outputTruncated = false;
 
   for await (const event of stream) {
     if (event.type === "test:pass" || event.type === "test:fail") {
       const data = event.data;
-      if (data.details.type === "suite") {
+      const isSuite = data.details.type === "suite";
+      if (isSuite) {
         await emit({ type: "suite" });
-        continue;
+        if (event.type === "test:pass") continue;
       }
       const error = event.type === "test:fail" ? data.details.error : undefined;
       await emit({
         type: "test",
-        name: truncateUtf8(data.name, MAX_NAME_BYTES).value,
+        name: truncateUtf8(sanitize(data.name), MAX_NAME_BYTES).value,
         status: statusFor(event.type, data, error),
         duration_ms: data.details.duration_ms,
-        nesting: data.nesting,
+        nesting: Math.min(data.nesting, 128),
+        is_suite: isSuite,
         file:
           data.file === undefined
             ? null
@@ -152,10 +161,23 @@ async function main() {
     }
 
     if (event.type === "test:stdout" || event.type === "test:stderr") {
+      // Continue consuming events after the budget is exhausted without
+      // serializing discarded output or buffering it in the Rust protocol.
+      if (outputTruncated && outputBytes >= options.max_output_bytes) continue;
       const message = truncateUtf8(
         sanitize(event.data.message),
-        MAX_OUTPUT_EVENT_BYTES,
+        Math.min(
+          MAX_OUTPUT_EVENT_BYTES,
+          options.max_output_bytes - outputBytes,
+        ),
       );
+      const retainedBytes = Buffer.byteLength(message.value);
+      outputBytes += retainedBytes;
+      // A remaining byte cannot hold a multibyte code point. Mark that budget
+      // exhausted so repeated non-ASCII output does not emit empty events.
+      if (message.truncated && retainedBytes === 0)
+        outputBytes = options.max_output_bytes;
+      outputTruncated ||= message.truncated;
       await emit({
         type: "output",
         stream: event.type === "test:stdout" ? "stdout" : "stderr",

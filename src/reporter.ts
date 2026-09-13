@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
-import { relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { TestResult, TestRunResult, TestStatus } from "./types.js";
+import { safeText } from "./safety.js";
 
 interface Palette {
   bold: (value: string) => string;
@@ -59,13 +60,16 @@ function displayPath(file: string): string {
   const withinProject = relative(project, absolute);
   if (
     withinProject &&
-    !withinProject.startsWith("..") &&
-    !withinProject.startsWith("/")
+    withinProject !== ".." &&
+    !withinProject.startsWith(`..${sep}`) &&
+    !isAbsolute(withinProject)
   ) {
     return withinProject.replaceAll("\\", "/");
   }
   const homeRelative = relative(resolve(homedir()), absolute);
-  return homeRelative.startsWith("..")
+  return homeRelative === ".." ||
+    homeRelative.startsWith(`..${sep}`) ||
+    isAbsolute(homeRelative)
     ? "<external>"
     : `<home>/${homeRelative.replaceAll("\\", "/")}`;
 }
@@ -97,19 +101,20 @@ export function formatReport(
   const colors = palette(color);
   const lines = [
     colors.bold("node-tester"),
-    colors.dim(`motor Rust | Node.js ${result.nodeVersion}`),
+    colors.dim(`motor Rust | Node.js ${safeText(result.nodeVersion, true)}`),
     "",
   ];
 
   for (const test of result.tests) {
-    const indent = "  ".repeat(Math.max(0, test.nesting));
+    const indent = "  ".repeat(Math.min(32, Math.max(0, test.nesting)));
     lines.push(
-      `${indent}${label(test.status, colors)} ${displayName(test)} ${colors.dim(formatDuration(test.durationMs))}`,
+      `${indent}${label(test.status, colors)} ${safeText(displayName(test), true)} ${colors.dim(formatDuration(test.durationMs))}`,
     );
     const source = location(test);
-    if (source) lines.push(`${indent}         ${colors.dim(source)}`);
+    if (source)
+      lines.push(`${indent}         ${colors.dim(safeText(source, true))}`);
     if (test.error) {
-      for (const errorLine of test.error.split(/\r?\n/u))
+      for (const errorLine of safeText(test.error).split(/\r?\n/u))
         lines.push(`${indent}         ${colors.red(errorLine)}`);
     }
   }
@@ -137,9 +142,15 @@ export function formatReport(
   if (showOutput && (result.output.stdout || result.output.stderr)) {
     lines.push("", colors.bold("Salida capturada"));
     if (result.output.stdout)
-      lines.push(colors.dim("stdout:"), result.output.stdout.trimEnd());
+      lines.push(
+        colors.dim("stdout:"),
+        safeText(result.output.stdout).trimEnd(),
+      );
     if (result.output.stderr)
-      lines.push(colors.dim("stderr:"), result.output.stderr.trimEnd());
+      lines.push(
+        colors.dim("stderr:"),
+        safeText(result.output.stderr).trimEnd(),
+      );
   }
 
   return `${lines.join("\n")}\n`;

@@ -20,7 +20,7 @@ procesos a una biblioteca Rust y presenta el resultado desde una CLI TypeScript.
 Ejecutar los tests:
 
 ```console
-node-tester test/unit.test.mjs
+node-tester test/fixtures/passing.test.mjs
 ```
 
 ![banner](./assets/test.png)
@@ -41,7 +41,7 @@ Rust controla el proceso completo: validación, lanzamiento, timeout global, can
 
 La herramienta no analiza TAP ni el texto de los reporters incorporados. Consume los eventos estructurados de `TestsStream` mediante un bridge versionado.
 
-## Compatibilidad de la versión 1.0
+## Compatibilidad de la versión 1.1
 
 - Node.js 22.13 o posterior.
 - ESM y CommonJS.
@@ -50,19 +50,29 @@ La herramienta no analiza TAP ni el texto de los reporters incorporados. Consume
 - macOS Intel y Apple Silicon.
 - Runner nativo `node:test` con aislamiento por proceso de archivo.
 
-Jest, Vitest, Mocha, Bun Test, harnesses personalizados, modo watch y cobertura no forman parte del contrato 1.0. Se implementarán como adaptadores independientes si se incorporan posteriormente.
+Jest, Vitest, Mocha, Bun Test, harnesses personalizados, modo watch y cobertura no forman parte del contrato 1.1.
 
 ## Instalación
 
 El nombre npm sin scope `node-tester` pertenece a otro proyecto. Esta distribución está preparada como paquete público con scope:
 
 ```bash
-npm install --global @rogergomezm/node-tester
+npm install --global @rogergomezm/node-tester@1.1.0
 node-tester --version
 ```
 
 El paquete instala el comando `node-tester` globalmente. También puede usarse
 como biblioteca ESM desde `@rogergomezm/node-tester`.
+
+El ejemplo inicial usa un fixture incluido en este repositorio. En otro proyecto,
+indica la ruta de un archivo real que use `node:test`; las rutas inexistentes
+producen un error de uso antes de lanzar el motor.
+
+Windows también dispone de un instalador `.exe` en
+[Production v1.1.0](https://github.com/Roger08G/node-tester/releases/tag/v1.1.0).
+Requiere Node.js 22.13 o posterior ya instalado, instala por usuario y permite
+añadir su directorio al PATH. No incluye Node.js ni necesita Rust o Bun.
+El ejecutable no está firmado con Authenticode; comprueba `SHA256SUMS.txt`.
 
 ## Uso
 
@@ -108,10 +118,16 @@ Códigos de salida:
 - Timeout por test predeterminado: 30 segundos.
 - Timeout global predeterminado: 15 minutos.
 - Captura total predeterminada: 64 KiB; máximo configurable por el motor: 64 MiB.
-- Cada mensaje del protocolo y el número total de eventos tienen límites defensivos.
+- Protocolo: 128 KiB por línea, 128 MiB totales y un millón de eventos; configuración de entrada de hasta 1 MiB.
 - Las rutas del proyecto y del directorio personal se eliminan de las trazas mostradas.
 - El bridge y el binario nativo se cargan desde rutas fijas del paquete.
-- La primera señal cancela y limpia los procesos; una segunda señal fuerza la salida.
+- Las señales cancelan y limpian el grupo; repetir una señal no interrumpe esa limpieza.
+
+El motor agrega los eventos mientras los lee, sin mantener otra copia de todos
+ellos. Exige saludo y resumen final válidos: un bridge incompleto, tests
+cancelados o fallos de hooks/suites nunca se interpretan como ejecución correcta.
+La captura de salida y el protocolo tienen límites separados; no son un límite
+de memoria total para el código de los tests.
 
 `node-tester` ejecuta código de test con los permisos del usuario. No es un sandbox para código no confiable. `--node-arg` puede cargar módulos y debe tratarse como ejecución de código local.
 
@@ -149,10 +165,16 @@ El benchmark informa la mediana y la sobrecarga observada. El proyecto no afirma
 
 La CI compila y prueba seis binarios nativos con Node.js 22.13.0 y 24. Un tag `v<versión>` solo publica después de superar Rust, TypeScript, auditorías, pruebas por plataforma, ensamblado del paquete y verificación de checksums. La publicación utiliza procedencia npm y genera un release de GitHub con el paquete y su SHA-256. El flujo es reintentable si npm o GitHub completan solo una parte del release.
 
-La publicación de producción utiliza el environment protegido `npm` y Trusted
-Publishing mediante OIDC, sin credenciales persistentes en el repositorio.
+La publicación utiliza el environment `npm`. El workflow admite un secreto
+`NPM_TOKEN` almacenado en GitHub Actions o Trusted Publishing mediante OIDC cuando
+la relación de confianza esté configurada en npm. El mero nombre del environment
+no implica reglas de protección: estas se administran en GitHub.
+El contenido publicado se verifica por su SHA-512 frente al registro npm;
+los reintentos no sustituyen assets existentes por archivos diferentes.
+El release incluye además instalador Windows, fuentes y `SHA256SUMS.txt`.
 
 Consulta [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) y [CHANGELOG.md](CHANGELOG.md).
+La [auditoría 1.1.0](docs/SECURITY_AUDIT_1.1.0.md) documenta correcciones, pruebas y límites.
 
 ## Licencia
 

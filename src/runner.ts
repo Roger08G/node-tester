@@ -32,6 +32,35 @@ export async function runTests(
   options: RunTestsOptions = {},
 ): Promise<TestRunResult> {
   assertNodeRuntime();
+  for (const [name, maximum] of [
+    ["concurrency", 1024],
+    ["testTimeoutMs", 604_800_000],
+    ["runTimeoutMs", 604_800_000],
+    ["maxOutputBytes", 64 * 1024 * 1024],
+  ] as const) {
+    const value = options[name];
+    if (
+      value !== undefined &&
+      (!Number.isSafeInteger(value) || value < 1 || value > maximum)
+    ) {
+      throw new Error(`${name} debe ser un entero entre 1 y ${maximum}.`);
+    }
+  }
+  for (const name of [
+    "files",
+    "globPatterns",
+    "testArgs",
+    "nodeArgs",
+  ] as const) {
+    const value = options[name];
+    if (
+      value !== undefined &&
+      (!Array.isArray(value) ||
+        value.some((item) => typeof item !== "string" || item.includes("\0")))
+    ) {
+      throw new Error(`${name} debe ser un array de strings sin bytes nulos.`);
+    }
+  }
   if (options.files?.length && options.globPatterns?.length) {
     throw new Error("files y globPatterns son mutuamente excluyentes.");
   }

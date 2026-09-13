@@ -2,13 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "1.*"]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "31 5 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -20,9 +23,12 @@ jobs:
   quality:
     name: Quality and Rust tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -61,8 +67,23 @@ jobs:
       - name: Test Rust workspace
         run: bun run test:rust
 
+  msrv:
+    name: MSRV (Rust 1.88.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install minimum Rust version
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check minimum Rust version
+        run: cargo +1.88.0 check --workspace --all-targets --locked
+
   native:
     name: ${{ matrix.target }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +104,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js 24
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -117,6 +140,12 @@ jobs:
       - name: Test with minimum Node.js version
         run: node --test test/*.test.mjs
 
+      - name: Smoke-test installed package
+        shell: bash
+        run: |
+          package="$(npm pack --ignore-scripts --silent)"
+          node scripts/smoke-package.mjs "$package"
+
       - name: Upload native engine
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -126,11 +155,14 @@ jobs:
 
   package:
     name: Assemble package
-    needs: [quality, native]
+    needs: [quality, msrv, native]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -177,11 +209,49 @@ jobs:
             *.tgz.sha256
           if-no-files-found: error
 
+  installer:
+    name: Build and test Windows installer
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+
+      - name: Download package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: npm-package
+          path: release
+
+      - name: Build verified installer and run install/uninstall smoke test
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $package = Get-ChildItem release -Filter '*.tgz' | Select-Object -First 1
+          ./scripts/build-windows-installer.ps1 -Version $version -PackagePath $package.FullName -OutputDirectory artifacts -SmokeTest
+
+      - name: Upload installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-installer
+          path: artifacts/*.exe
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish production release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: package
+    needs: [package, installer]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: npm
     permissions:
       contents: write
@@ -189,6 +259,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -208,11 +280,18 @@ jobs:
         working-directory: release
         run: sha256sum --check *.tgz.sha256
 
+      - name: Download installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: windows-installer
+          path: release
+
       - name: Configure npm authentication
         shell: bash
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          umask 077
           npmrc="$RUNNER_TEMP/node-tester-npmrc"
           printf '%s\n' 'registry=https://registry.npmjs.org/' > "$npmrc"
           if [[ -n "${NPM_TOKEN:-}" ]]; then
@@ -222,37 +301,22 @@ jobs:
 
       - name: Check existing npm version
         id: npm-version
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          package="@rogergomezm/node-tester"
-          if npm view "$package@$version" version >/dev/null 2>&1 || \
-             npm dist-tag ls "$package" 2>/dev/null | grep -Eq "^latest:[[:space:]]+$version$"; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: node scripts/verify-npm-publication.mjs --check release
 
       - name: Publish to npm with provenance
         if: steps.npm-version.outputs.published != 'true'
         working-directory: release
-        run: npm publish *.tgz --access public --provenance
+        run: npm publish *.tgz --access public --provenance --ignore-scripts
 
       - name: Verify npm publication
+        run: node scripts/verify-npm-publication.mjs --verify release
+
+      - name: Package source and checksums
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          package="@rogergomezm/node-tester"
-          for attempt in {1..10}; do
-            published="$(npm view "$package@$version" version 2>/dev/null || true)"
-            [[ "$published" == "$version" ]] && exit 0
-            if npm dist-tag ls "$package" 2>/dev/null | grep -Eq "^latest:[[:space:]]+$version$"; then
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "npm did not expose $package@$version after publication" >&2
-          exit 1
+          git archive --format=zip --prefix="node-tester-${GITHUB_REF_NAME}-source/" --output="release/node-tester-${GITHUB_REF_NAME}-source.zip" HEAD
+          cd release
+          sha256sum *.tgz *.zip *.exe > SHA256SUMS.txt
 
       - name: Create or repair GitHub release
         env:
@@ -260,10 +324,9 @@ jobs:
         shell: bash
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release/*.tgz release/*.tgz.sha256 --clobber
-            gh release edit "$GITHUB_REF_NAME" --title "Production ${GITHUB_REF_NAME#v}"
+            node scripts/verify-release-assets.mjs release
           else
-            gh release create "$GITHUB_REF_NAME" release/*.tgz release/*.tgz.sha256 --verify-tag --generate-notes --title "Production ${GITHUB_REF_NAME#v}"
+            gh release create "$GITHUB_REF_NAME" release/* --verify-tag --generate-notes --title "Production $GITHUB_REF_NAME" --latest
           fi
 
       - name: Verify GitHub release
@@ -275,3 +338,12 @@ jobs:
           assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '[.assets[].name | select(endswith(".tgz") or endswith(".tgz.sha256"))] | length')"
           [[ "$tag" == "$GITHUB_REF_NAME" ]]
           [[ "$assets" -eq 2 ]]
+          node scripts/verify-release-assets.mjs release
+
+      - name: Remove temporary npm credentials
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${NPM_CONFIG_USERCONFIG:-}" && "$NPM_CONFIG_USERCONFIG" == "$RUNNER_TEMP/node-tester-npmrc" ]]; then
+            rm -f -- "$NPM_CONFIG_USERCONFIG"
+          fi

@@ -145,3 +145,43 @@ test("reports invalid CLI options as usage errors", async () => {
   assert.equal(result.code, 2);
   assert.match(result.stderr, /Opción desconocida/u);
 });
+
+test("reports a missing explicit file without requiring captured output", async () => {
+  const result = await invoke([
+    "test/this-file-does-not-exist.test.mjs",
+    "--no-color",
+  ]);
+  assert.equal(result.code, 2);
+  assert.match(
+    result.stderr,
+    /test file .*this-file-does-not-exist.*not accessible/u,
+  );
+  assert.doesNotMatch(result.stderr, /Roger Gómez/u);
+});
+
+test("shows suite cleanup failures", async () => {
+  const result = await invoke([
+    "test/fixtures/suite-hook.test.mjs",
+    "--no-color",
+  ]);
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /suite cleanup failed/u);
+});
+
+test("neutralizes terminal controls in names, errors and captured output", async () => {
+  const result = await invoke([
+    "test/fixtures/terminal-output.test.mjs",
+    "--no-color",
+    "--show-output",
+  ]);
+  assert.equal(result.code, 1);
+  assert.doesNotMatch(result.stdout, /[\u001b\u0007\r]/u);
+  assert.match(result.stdout, /safe name forged line/u);
+  assert.match(result.stdout, /stdoutcontent/u);
+});
+
+test("neutralizes terminal controls in usage errors", async () => {
+  const result = await invoke(["--unknown\u001b]52;c;ignored\u0007"]);
+  assert.equal(result.code, 2);
+  assert.doesNotMatch(result.stderr, /[\u001b\u0007\r]/u);
+});

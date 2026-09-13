@@ -1,0 +1,4 @@
+#!/bin/sh
+script_path=$(printf '%s' "$0" | tr '\\' '/')
+script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd) || exit 2
+exec node "$script_dir/package/dist/cli.js" "$@"

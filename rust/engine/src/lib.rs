@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    collections::HashSet,
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -26,6 +27,7 @@ const MAX_PROTOCOL_BYTES: usize = 128 * 1024 * 1024;
 const MAX_PROTOCOL_EVENTS: usize = 1_000_000;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 const MAX_TIMEOUT_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+const MAX_INPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -119,17 +121,29 @@ impl EngineOptions {
 
         self.cwd = canonical_directory(&self.cwd, "cwd")?;
         self.bridge_path = canonical_file(&self.bridge_path, "bridgePath")?;
+        let mut seen = HashSet::new();
         self.files = self
             .files
             .into_iter()
             .map(|file| {
-                if file.is_absolute() {
+                let file = if file.is_absolute() {
                     dunce::simplified(&file).to_path_buf()
                 } else {
                     self.cwd.join(file)
-                }
+                };
+                canonical_file(&file, &format!("test file '{}'", file.display()))
             })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|file| seen.insert(file.clone()))
             .collect();
+        let input = serde_json::to_vec(&BridgeInput::from(&self))
+            .map_err(|error| EngineError::InvalidOptions(error.to_string()))?;
+        if input.len() >= MAX_INPUT_BYTES {
+            return Err(EngineError::InvalidOptions(format!(
+                "bridge configuration exceeds {MAX_INPUT_BYTES} bytes"
+            )));
+        }
         Ok(self)
     }
 }
@@ -200,6 +214,8 @@ pub struct TestResult {
     pub nesting: u32,
     pub location: TestLocation,
     pub error: Option<String>,
+    #[serde(default)]
+    pub is_suite: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -244,6 +260,7 @@ struct BridgeInput<'a> {
     glob_patterns: &'a [String],
     concurrency: Option<u32>,
     test_timeout_ms: u64,
+    max_output_bytes: usize,
     name_pattern: &'a Option<String>,
     skip_pattern: &'a Option<String>,
     only: bool,
@@ -263,6 +280,7 @@ impl<'a> From<&'a EngineOptions> for BridgeInput<'a> {
             glob_patterns: &options.glob_patterns,
             concurrency: options.concurrency,
             test_timeout_ms: options.test_timeout_ms,
+            max_output_bytes: options.max_output_bytes,
             name_pattern: &options.name_pattern,
             skip_pattern: &options.skip_pattern,
             only: options.only,
@@ -288,6 +306,8 @@ enum BridgeEvent {
         line: Option<u32>,
         column: Option<u32>,
         error: Option<String>,
+        #[serde(default)]
+        is_suite: bool,
     },
     Suite,
     Output {
@@ -319,6 +339,7 @@ enum Termination {
     Completed,
     TimedOut,
     Cancelled,
+    ReaderFailed,
 }
 
 pub fn run_tests(
@@ -327,6 +348,23 @@ pub fn run_tests(
 ) -> Result<RunResult, EngineError> {
     let options = options.validate()?;
     let started = Instant::now();
+    if control.is_cancelled() {
+        return Ok(RunResult {
+            engine: "rust".to_owned(),
+            node_version: "unknown".to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            success: false,
+            timed_out: false,
+            cancelled: true,
+            duration_ms: 0.0,
+            counts: ResultCounts::default(),
+            tests: Vec::new(),
+            output: CapturedOutput::default(),
+        });
+    }
+    let mut input = serde_json::to_vec(&BridgeInput::from(&options))
+        .map_err(|error| EngineError::Protocol(format!("cannot encode bridge input: {error}")))?;
+    input.push(b'\n');
     let mut command = Command::new(&options.node_path);
     command
         .arg(&options.bridge_path)
@@ -337,7 +375,10 @@ pub fn run_tests(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = command.group_spawn().map_err(EngineError::Spawn)?;
+    let mut group = command.group();
+    #[cfg(windows)]
+    group.kill_on_drop(true).creation_flags(0x0800_0000);
+    let mut child = group.spawn().map_err(EngineError::Spawn)?;
     let stdout = child
         .inner()
         .stdout
@@ -348,36 +389,78 @@ pub fn run_tests(
         .stderr
         .take()
         .ok_or_else(|| EngineError::Protocol("bridge stderr was not captured".to_owned()))?;
-    let stdout_reader = thread::spawn(move || read_protocol(stdout));
-    let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_STDERR_BYTES));
-
     let mut stdin = child
         .inner()
         .stdin
         .take()
         .ok_or_else(|| EngineError::Protocol("bridge stdin was not captured".to_owned()))?;
-    let input_result = serde_json::to_writer(&mut stdin, &BridgeInput::from(&options))
-        .map_err(|error| EngineError::Protocol(format!("cannot encode bridge input: {error}")))
-        .and_then(|()| stdin.write_all(b"\n").map_err(EngineError::Io));
-    drop(stdin);
-    if let Err(error) = input_result {
-        let _ = terminate(&mut child);
-        let _ = stdout_reader.join();
-        let _ = stderr_reader.join();
-        return Err(error);
-    }
-
-    let (status, termination) = wait_for_child(
+    let io_failed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&io_failed);
+    let stdout_reader = thread::spawn(move || {
+        let result = read_protocol(stdout, options.max_output_bytes);
+        if result.is_err() {
+            flag.store(true, Ordering::Release);
+        }
+        result
+    });
+    let flag = Arc::clone(&io_failed);
+    let stderr_reader = thread::spawn(move || {
+        let result = read_bounded(stderr, MAX_STDERR_BYTES);
+        if result.is_err() {
+            flag.store(true, Ordering::Release);
+        }
+        result
+    });
+    let flag = Arc::clone(&io_failed);
+    let stdin_writer = thread::spawn(move || {
+        let result = stdin.write_all(&input).map_err(EngineError::Io);
+        if result.is_err() {
+            flag.store(true, Ordering::Release);
+        }
+        result
+    });
+    let waited = wait_for_child(
         &mut child,
         Duration::from_millis(options.run_timeout_ms),
+        started,
         &control,
-    )?;
+        &io_failed,
+    );
+    // A leader can exit while descendants still hold its pipes open. Always
+    // terminate the group before waiting for any I/O worker to finish.
+    let _ = child.kill();
+    let cleanup_started = Instant::now();
+    while !(stdout_reader.is_finished()
+        && stderr_reader.is_finished()
+        && stdin_writer.is_finished())
+    {
+        if cleanup_started.elapsed() >= Duration::from_secs(2) {
+            return Err(EngineError::Protocol(
+                "bridge pipes remained open after process-group cleanup".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (status, termination) = waited?;
     let events = stdout_reader
         .join()
-        .map_err(|_| EngineError::ReaderPanicked)??;
+        .map_err(|_| EngineError::ReaderPanicked)?;
     let stderr = stderr_reader
         .join()
         .map_err(|_| EngineError::ReaderPanicked)??;
+    let written = stdin_writer
+        .join()
+        .map_err(|_| EngineError::ReaderPanicked)?;
+    let events = match events {
+        Ok(events) => events,
+        Err(_) if matches!(termination, Termination::TimedOut | Termination::Cancelled) => {
+            ProtocolState::default()
+        }
+        Err(error) => return Err(error),
+    };
+    if !matches!(termination, Termination::TimedOut | Termination::Cancelled) {
+        written?;
+    }
 
     aggregate(
         events,
@@ -392,9 +475,10 @@ pub fn run_tests(
 fn wait_for_child(
     child: &mut GroupChild,
     timeout: Duration,
+    started: Instant,
     control: &RunControl,
+    io_failed: &AtomicBool,
 ) -> Result<(ExitStatus, Termination), EngineError> {
-    let started = Instant::now();
     loop {
         if control.is_cancelled() {
             return terminate(child).map(|status| (status, Termination::Cancelled));
@@ -402,7 +486,10 @@ fn wait_for_child(
         if started.elapsed() >= timeout {
             return terminate(child).map(|status| (status, Termination::TimedOut));
         }
-        if let Some(status) = child.try_wait().map_err(EngineError::Io)? {
+        if io_failed.load(Ordering::Acquire) {
+            return terminate(child).map(|status| (status, Termination::ReaderFailed));
+        }
+        if let Some(status) = child.inner().try_wait().map_err(EngineError::Io)? {
             return Ok((status, Termination::Completed));
         }
         thread::sleep(Duration::from_millis(10));
@@ -410,47 +497,72 @@ fn wait_for_child(
 }
 
 fn terminate(child: &mut GroupChild) -> Result<ExitStatus, EngineError> {
-    if let Some(status) = child.try_wait().map_err(EngineError::Io)? {
-        return Ok(status);
-    }
     if let Err(error) = child.kill() {
-        if let Some(status) = child.try_wait().map_err(EngineError::Io)? {
+        if let Some(status) = child.inner().try_wait().map_err(EngineError::Io)? {
             return Ok(status);
         }
         return Err(EngineError::Io(error));
     }
-    child.wait().map_err(EngineError::Io)
+    let cleanup_started = Instant::now();
+    loop {
+        if let Some(status) = child.inner().try_wait().map_err(EngineError::Io)? {
+            return Ok(status);
+        }
+        if cleanup_started.elapsed() >= Duration::from_secs(2) {
+            return Err(EngineError::Protocol(
+                "bridge did not exit after process-group termination".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
-fn read_protocol(reader: impl Read) -> Result<Vec<BridgeEvent>, EngineError> {
-    let mut events = Vec::new();
+fn read_protocol(reader: impl Read, max_output_bytes: usize) -> Result<ProtocolState, EngineError> {
+    let mut state = ProtocolState::default();
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
     let mut total_bytes = 0_usize;
-    for line in BufReader::new(reader).split(b'\n') {
-        let line = line.map_err(EngineError::Io)?;
-        if line.is_empty() {
-            continue;
+    let mut event_count = 0_usize;
+    loop {
+        line.clear();
+        // Take limits the allocation before a newline arrives, including when
+        // the child writes an unterminated, arbitrarily large protocol line.
+        let read = reader
+            .by_ref()
+            .take((MAX_PROTOCOL_LINE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)
+            .map_err(EngineError::Io)?;
+        if read == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(read);
+        if line.last() == Some(&b'\n') {
+            line.pop();
         }
         if line.len() > MAX_PROTOCOL_LINE_BYTES {
             return Err(EngineError::Protocol(format!(
                 "a protocol line exceeded {MAX_PROTOCOL_LINE_BYTES} bytes"
             )));
         }
-        total_bytes = total_bytes.saturating_add(line.len());
         if total_bytes > MAX_PROTOCOL_BYTES {
             return Err(EngineError::Protocol(format!(
                 "protocol output exceeded {MAX_PROTOCOL_BYTES} bytes"
             )));
         }
-        if events.len() >= MAX_PROTOCOL_EVENTS {
+        if line.is_empty() {
+            continue;
+        }
+        event_count += 1;
+        if event_count > MAX_PROTOCOL_EVENTS {
             return Err(EngineError::Protocol(format!(
                 "the bridge emitted more than {MAX_PROTOCOL_EVENTS} events"
             )));
         }
         let event = serde_json::from_slice(&line)
             .map_err(|error| EngineError::Protocol(format!("invalid JSON event: {error}")))?;
-        events.push(event);
+        state.push(event, max_output_bytes)?;
     }
-    Ok(events)
+    Ok(state)
 }
 
 struct BoundedBytes {
@@ -474,35 +586,42 @@ fn read_bounded(mut reader: impl Read, max_bytes: usize) -> Result<BoundedBytes,
     Ok(BoundedBytes { bytes, truncated })
 }
 
-fn aggregate(
-    events: Vec<BridgeEvent>,
-    status: ExitStatus,
-    termination: Termination,
-    elapsed: Duration,
-    max_output_bytes: usize,
-    bridge_stderr: BoundedBytes,
-) -> Result<RunResult, EngineError> {
-    let mut ready = None;
-    let mut tests = Vec::new();
-    let mut suites = 0_u64;
-    let mut output = CapturedOutput::default();
-    let mut retained_output_bytes = 0_usize;
-    let mut final_summary = None;
-    let mut last_summary = None;
-    let mut fatal = None;
+#[derive(Debug, Default)]
+struct ProtocolState {
+    ready: Option<String>,
+    tests: Vec<TestResult>,
+    suites: u64,
+    output: CapturedOutput,
+    retained_output_bytes: usize,
+    final_summary: Option<(bool, ResultCounts, f64)>,
+    fatal: Option<String>,
+}
 
-    for event in events {
+impl ProtocolState {
+    fn push(&mut self, event: BridgeEvent, max_output_bytes: usize) -> Result<(), EngineError> {
+        if self.final_summary.is_some() {
+            return Err(EngineError::Protocol(
+                "event received after the final summary".to_owned(),
+            ));
+        }
+        if self.ready.is_none()
+            && !matches!(event, BridgeEvent::Ready { .. } | BridgeEvent::Fatal { .. })
+        {
+            return Err(EngineError::Protocol(
+                "event received before the handshake".to_owned(),
+            ));
+        }
         match event {
             BridgeEvent::Ready {
                 protocol_version,
                 node_version,
             } => {
-                if protocol_version != PROTOCOL_VERSION {
+                if self.ready.is_some() || protocol_version != PROTOCOL_VERSION {
                     return Err(EngineError::Protocol(format!(
                         "expected protocol {PROTOCOL_VERSION}, got {protocol_version}"
                     )));
                 }
-                ready = Some(node_version);
+                self.ready = Some(node_version);
             }
             BridgeEvent::Test {
                 name,
@@ -513,26 +632,35 @@ fn aggregate(
                 line,
                 column,
                 error,
-            } => tests.push(TestResult {
-                name,
-                status,
-                duration_ms,
-                nesting,
-                location: TestLocation { file, line, column },
-                error,
-            }),
-            BridgeEvent::Suite => suites += 1,
+                is_suite,
+            } => {
+                if !duration_ms.is_finite() || duration_ms < 0.0 || nesting > 128 {
+                    return Err(EngineError::Protocol(
+                        "invalid test duration or nesting".to_owned(),
+                    ));
+                }
+                self.tests.push(TestResult {
+                    name,
+                    status,
+                    duration_ms,
+                    nesting,
+                    location: TestLocation { file, line, column },
+                    error,
+                    is_suite,
+                });
+            }
+            BridgeEvent::Suite => self.suites += 1,
             BridgeEvent::Output {
                 stream,
                 message,
                 truncated,
             } => {
-                let retained = retain_utf8(&message, max_output_bytes - retained_output_bytes);
-                retained_output_bytes += retained.len();
-                output.truncated |= truncated || retained.len() < message.len();
+                let retained = retain_utf8(&message, max_output_bytes - self.retained_output_bytes);
+                self.retained_output_bytes += retained.len();
+                self.output.truncated |= truncated || retained.len() < message.len();
                 match stream {
-                    OutputStream::Stdout => output.stdout.push_str(retained),
-                    OutputStream::Stderr => output.stderr.push_str(retained),
+                    OutputStream::Stdout => self.output.stdout.push_str(retained),
+                    OutputStream::Stderr => self.output.stderr.push_str(retained),
                 }
             }
             BridgeEvent::Summary {
@@ -541,15 +669,36 @@ fn aggregate(
                 duration_ms,
                 file,
             } => {
-                let summary = (success, counts, duration_ms);
-                last_summary = Some(summary.clone());
+                if !duration_ms.is_finite() || duration_ms < 0.0 {
+                    return Err(EngineError::Protocol("invalid summary duration".to_owned()));
+                }
                 if file.is_none() {
-                    final_summary = Some(summary);
+                    self.final_summary = Some((success, counts, duration_ms));
                 }
             }
-            BridgeEvent::Fatal { message } => fatal = Some(message),
+            BridgeEvent::Fatal { message } => self.fatal = Some(message),
         }
+        Ok(())
     }
+}
+
+fn aggregate(
+    state: ProtocolState,
+    status: ExitStatus,
+    termination: Termination,
+    elapsed: Duration,
+    max_output_bytes: usize,
+    bridge_stderr: BoundedBytes,
+) -> Result<RunResult, EngineError> {
+    let ProtocolState {
+        ready,
+        tests,
+        suites,
+        mut output,
+        retained_output_bytes,
+        final_summary,
+        fatal,
+    } = state;
 
     if termination == Termination::Completed {
         if let Some(message) = fatal {
@@ -572,7 +721,9 @@ fn aggregate(
                 "the bridge did not complete its handshake".to_owned(),
             ));
         }
-        (None, Termination::TimedOut | Termination::Cancelled) => "unknown".to_owned(),
+        (None, Termination::TimedOut | Termination::Cancelled | Termination::ReaderFailed) => {
+            "unknown".to_owned()
+        }
     };
     if !bridge_stderr.bytes.is_empty() {
         let message = String::from_utf8_lossy(&bridge_stderr.bytes);
@@ -581,7 +732,12 @@ fn aggregate(
         output.truncated |= bridge_stderr.truncated || retained.len() < message.len();
     }
     let derived = derive_counts(&tests, suites);
-    let summary = final_summary.or(last_summary);
+    if termination == Termination::Completed && final_summary.is_none() {
+        return Err(EngineError::Protocol(
+            "the bridge did not emit a final summary".to_owned(),
+        ));
+    }
+    let summary = final_summary;
     let counts = merge_counts(&derived, summary.as_ref().map(|item| &item.1));
     let native_success = summary.as_ref().is_none_or(|item| item.0);
     let duration_ms = if termination == Termination::Completed {
@@ -595,7 +751,13 @@ fn aggregate(
         engine: "rust".to_owned(),
         node_version,
         protocol_version: PROTOCOL_VERSION,
-        success: termination == Termination::Completed && counts.failed == 0 && native_success,
+        success: termination == Termination::Completed
+            && counts.failed == 0
+            && counts.cancelled == 0
+            && !tests
+                .iter()
+                .any(|test| matches!(test.status, TestStatus::Failed | TestStatus::Cancelled))
+            && native_success,
         timed_out: termination == Termination::TimedOut,
         cancelled: termination == Termination::Cancelled,
         duration_ms,
@@ -618,11 +780,14 @@ fn retain_utf8(value: &str, max_bytes: usize) -> &str {
 
 fn derive_counts(tests: &[TestResult], suites: u64) -> ResultCounts {
     let mut counts = ResultCounts {
-        tests: tests.len() as u64,
+        tests: tests.iter().filter(|test| !test.is_suite).count() as u64,
         suites,
         ..ResultCounts::default()
     };
     for test in tests {
+        if test.is_suite {
+            continue;
+        }
         match test.status {
             TestStatus::Passed => counts.passed += 1,
             TestStatus::Failed => counts.failed += 1,
@@ -738,5 +903,118 @@ mod tests {
         let result = run_tests(options, Arc::new(RunControl::default())).unwrap();
         assert_eq!(result.output.stdout.len(), 512);
         assert!(result.output.truncated);
+    }
+
+    fn bridge_options(name: &str) -> EngineOptions {
+        let mut options = options_for("passing.test.mjs");
+        options.bridge_path = workspace_root().join("test/bridges").join(name);
+        options
+    }
+
+    #[test]
+    fn rejects_missing_files_before_spawning() {
+        let error = options_for("this-file-does-not-exist.test.mjs")
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("test file"));
+        assert!(error.to_string().contains("not accessible"));
+    }
+
+    #[test]
+    fn bounds_an_unterminated_protocol_line_before_allocating_it() {
+        let error = read_protocol(io::repeat(b'x'), 128).unwrap_err();
+        assert!(error.to_string().contains("protocol line exceeded"));
+    }
+
+    #[test]
+    fn aggregates_output_within_budget_as_events_arrive() {
+        let mut state = ProtocolState::default();
+        state
+            .push(
+                BridgeEvent::Ready {
+                    protocol_version: 1,
+                    node_version: "24".to_owned(),
+                },
+                128,
+            )
+            .unwrap();
+        for _ in 0..1_000 {
+            state
+                .push(
+                    BridgeEvent::Output {
+                        stream: OutputStream::Stdout,
+                        message: "x".repeat(4096),
+                        truncated: false,
+                    },
+                    128,
+                )
+                .unwrap();
+        }
+        assert_eq!(state.output.stdout.len(), 128);
+        assert_eq!(state.retained_output_bytes, 128);
+        assert!(state.output.truncated);
+    }
+
+    #[test]
+    fn rejects_a_completed_bridge_without_its_final_summary() {
+        let error = run_tests(
+            bridge_options("missing-summary.mjs"),
+            Arc::new(RunControl::default()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("final summary"));
+    }
+
+    #[test]
+    fn kills_a_bridge_immediately_when_protocol_reading_fails() {
+        let started = Instant::now();
+        let error = run_tests(
+            bridge_options("invalid.mjs"),
+            Arc::new(RunControl::default()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("protocol line exceeded"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn timeout_includes_a_blocked_configuration_writer() {
+        let mut options = bridge_options("no-read.mjs");
+        options.test_args.push("x".repeat(512 * 1024));
+        options.run_timeout_ms = 100;
+        let started = Instant::now();
+        let result = run_tests(options, Arc::new(RunControl::default())).unwrap();
+        assert!(result.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn cleans_descendants_holding_pipes_after_the_leader_exits() {
+        let started = Instant::now();
+        let result = run_tests(
+            bridge_options("orphan-pipes.mjs"),
+            Arc::new(RunControl::default()),
+        )
+        .unwrap();
+        assert!(result.success);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn rejects_oversized_configuration_before_spawning() {
+        let mut options = bridge_options("no-read.mjs");
+        options.test_args.push("x".repeat(MAX_INPUT_BYTES));
+        let error = options.validate().unwrap_err();
+        assert!(error.to_string().contains("configuration exceeds"));
+    }
+
+    #[test]
+    fn rejects_extreme_nesting_from_the_protocol() {
+        let events = concat!(
+            "{\"type\":\"ready\",\"protocol_version\":1,\"node_version\":\"24\"}\n",
+            "{\"type\":\"test\",\"name\":\"test\",\"status\":\"passed\",\"duration_ms\":0,\"nesting\":4294967295}\n"
+        );
+        let error = read_protocol(events.as_bytes(), 128).unwrap_err();
+        assert!(error.to_string().contains("nesting"));
     }
 }
