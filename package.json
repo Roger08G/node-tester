@@ -86,6 +86,6 @@
     "@napi-rs/cli": "^3.9.1",
     "@types/node": "^22.20.2",
     "prettier": "^3.9.6",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   }
 }
