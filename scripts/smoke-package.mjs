@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +20,10 @@ const run = (command, args) =>
   });
 try {
   // tar extraction does not run lifecycle scripts or require development tools.
-  run("tar", ["-xzf", tarball, "-C", temporary]);
+  // GNU tar in Git Bash treats a drive letter in -f as a remote host. A local
+  // basename in the temporary cwd works with GNU tar and Windows/BSD tar.
+  copyFileSync(tarball, join(temporary, "artifact.tgz"));
+  run("tar", ["-xzf", "artifact.tgz"]);
   const cli = join(temporary, "package", "dist", "cli.js");
   assert.equal(
     run(process.execPath, [cli, "--version"]).trim(),
