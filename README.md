@@ -1,7 +1,7 @@
 <h1 align="center">🍀 Node Tester</h1>
 
 <p align="center">
-  CLI TypeScript para ejecutar <code>node:test</code> mediante un motor de control escrito en Rust.
+  🌟 CLI TypeScript para ejecutar <code>node:test</code> mediante un motor de control escrito en Rust 🌟
 </p>
 
 <p align="center">
