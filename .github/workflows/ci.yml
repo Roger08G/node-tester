@@ -178,7 +178,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download native engines
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: native-*
           path: native
@@ -226,7 +226,7 @@ jobs:
           node-version: 24
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: npm-package
           path: release
@@ -271,7 +271,7 @@ jobs:
         run: node scripts/verify-release-tag.mjs
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: npm-package
           path: release
@@ -281,7 +281,7 @@ jobs:
         run: sha256sum --check *.tgz.sha256
 
       - name: Download installer
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: windows-installer
           path: release
