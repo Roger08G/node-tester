@@ -147,7 +147,7 @@ jobs:
           node scripts/smoke-package.mjs "$package"
 
       - name: Upload native engine
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: native-${{ matrix.target }}
           path: native/*.node
@@ -201,7 +201,7 @@ jobs:
         run: npm pack --dry-run
 
       - name: Upload npm package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: npm-package
           path: |
@@ -239,7 +239,7 @@ jobs:
           ./scripts/build-windows-installer.ps1 -Version $version -PackagePath $package.FullName -OutputDirectory artifacts -SmokeTest
 
       - name: Upload installer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-installer
           path: artifacts/*.exe
